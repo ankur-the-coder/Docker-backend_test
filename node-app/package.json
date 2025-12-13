@@ -1,0 +1,13 @@
+{
+    "name": "node-benchmark-app",
+    "version": "1.0.0",
+    "description": "Node.js API for benchmarking",
+    "main": "index.js",
+    "scripts": {
+      "start": "node index.js"
+    },
+    "dependencies": {
+      "fastify": "^4.24.3",
+      "mysql2": "^3.6.5"
+    }
+  }
