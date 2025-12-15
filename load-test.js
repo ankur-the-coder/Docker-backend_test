@@ -1,81 +1,47 @@
 import http from 'k6/http';
-import { check, sleep } from 'k6';
-import { Trend } from 'k6/metrics'; // Import Trend for custom metrics
+import { check } from 'k6';
 
 // -----------------------------------------------------------------------
-// CONFIGURATION & METRICS
+// DYNAMIC CONFIGURATION
 // -----------------------------------------------------------------------
 const PORT = __ENV.PORT || '3000';
+const MODE = __ENV.MODE || 'db'; // 'db' or 'calc'
 const BASE_URL = `http://localhost:${PORT}`;
-const COMPLEX_N = 38; // Fibonacci number for complexity
-const complexCalcTime = new Trend('complex_calc_time_ms'); // New custom metric
 
 // -----------------------------------------------------------------------
-// LOAD SCENARIOS
+// STRESS TEST SCENARIO
 // -----------------------------------------------------------------------
+// We ramp up connections aggressively to find the breaking point ( > 1000ms)
 export const options = {
-    // 1. Define custom metrics for the output
-    thresholds: {
-        http_req_duration: ['p(95)<500'],
-        http_req_failed: ['rate<0.01'],
-        complex_calc_time_ms: ['p(95)<1000'], // Example: 95% of calculation must be < 1000ms
+  scenarios: {
+    breaking_point: {
+      executor: 'ramping-vus',
+      startVUs: 10,
+      stages: [
+        { duration: '15s', target: 100 },   // Warm up
+        { duration: '2m', target: 2000 },   // Ramp up to 2000 concurrent users
+        { duration: '15s', target: 0 },     // Cooldown
+      ],
     },
-    // 2. Separate scenarios for I/O and CPU tests
-    scenarios: {
-        // Scenario A: I/O Bound Test (DB Query)
-        io_test: {
-            executor: 'constant-arrival-rate',
-            rate: 200, // 200 requests per second
-            timeUnit: '1s',
-            duration: '60s',
-            preAllocatedVUs: 500,
-            exec: 'ioBoundTest',
-        },
-        // Scenario B: CPU + I/O Bound Test (Complex Calculation + DB Query)
-        complex_test: {
-            executor: 'constant-arrival-rate',
-            rate: 10, // Lower rate for CPU-intensive task
-            timeUnit: '1s',
-            duration: '60s',
-            preAllocatedVUs: 50,
-            exec: 'cpuBoundTest',
-        },
-    },
+  },
+  thresholds: {
+    // We want to see at what concurrency the 95th percentile exceeds 1000ms
+    http_req_duration: ['p(95)<1000'], 
+    http_req_failed: ['rate<0.01'],
+  },
 };
 
-// -----------------------------------------------------------------------
-// I/O BOUND TEST FUNCTION
-// -----------------------------------------------------------------------
-export function ioBoundTest() {
+export default function () {
+  let res;
+
+  if (MODE === 'db') {
     const randomId = Math.floor(Math.random() * 3) + 1;
-    const res = http.get(`${BASE_URL}/users/${randomId}`);
-    check(res, {
-        'IO: status is 200': (r) => r.status === 200,
-    });
-    sleep(0.1);
-}
+    res = http.get(`${BASE_URL}/db/${randomId}`);
+  } else {
+    res = http.get(`${BASE_URL}/calc`);
+  }
 
-// -----------------------------------------------------------------------
-// CPU BOUND TEST FUNCTION
-// -----------------------------------------------------------------------
-export function cpuBoundTest() {
-    const res = http.get(`${BASE_URL}/complex/${COMPLEX_N}`);
-
-    check(res, {
-        'CPU: status is 200': (r) => r.status === 200,
-    });
-
-    // Extract custom metric from JSON response
-    try {
-        const jsonBody = res.json();
-        if (jsonBody && jsonBody.calc_time_ms !== undefined) {
-            // Add the calculation time to the custom trend metric
-            complexCalcTime.add(jsonBody.calc_time_ms);
-        }
-    } catch (e) {
-        // Handle non-JSON or failed responses gracefully
-        console.error(`Error parsing JSON or extracting metric: ${e}`);
-    }
-
-    sleep(0.1);
+  check(res, {
+    'status is 200': (r) => r.status === 200,
+  });
 }

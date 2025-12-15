@@ -1,96 +1,129 @@
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     routing::get,
-    Router, Json, http::StatusCode,
+    Json, Router,
 };
-use std::{net::SocketAddr, env, time::{Instant, Duration}};
-use serde::{Serialize, Deserialize};
-use sqlx::mysql::{MySqlPoolOptions, MySqlPool};
-use serde_json::json;
+use serde::Serialize;
+use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
+use std::{env, sync::Arc};
+use tokio::sync::{mpsc, oneshot};
 
-// Define a struct for shared application state
+#[derive(Serialize, sqlx::FromRow)]
+struct User {
+    id: i32,
+    name: String,
+    email: String,
+}
+
+/* ---------- PRIME LOGIC ---------- */
+
+fn is_prime(num: i32) -> bool {
+    if num <= 1 {
+        return false;
+    }
+    let limit = (num as f64).sqrt() as i32;
+    for i in 2..=limit {
+        if num % i == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn compute_10k_prime() -> i32 {
+    let mut count = 0;
+    let mut num = 2;
+    while count < 10_000 {
+        if is_prime(num) {
+            count += 1;
+        }
+        num += 1;
+    }
+    num - 1
+}
+
+/* ---------- WORKER POOL ---------- */
+
+type Job = oneshot::Sender<i32>;
+
 #[derive(Clone)]
 struct AppState {
     pool: MySqlPool,
+    job_tx: mpsc::Sender<Job>,
 }
+
+fn start_workers(rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Job>>>) {
+    let workers = num_cpus::get();
+
+    for _ in 0..workers {
+        let rx = rx.clone();
+        std::thread::spawn(move || loop {
+            let job = rx.blocking_lock().blocking_recv();
+            if let Some(tx) = job {
+                let result = compute_10k_prime();
+                let _ = tx.send(result);
+            }
+        });
+    }
+}
+
+/* ---------- MAIN ---------- */
 
 #[tokio::main]
 async fn main() {
-    // Database connection using SQLx
-    dotenv::dotenv().ok(); // Load .env file
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = env::var("DATABASE_URL").unwrap();
+
     let pool = MySqlPoolOptions::new()
         .max_connections(10)
-        .connect(&database_url).await.expect("Failed to create SQLx pool.");
+        .connect(&database_url)
+        .await
+        .unwrap();
 
-    let shared_state = AppState { pool };
+    let (job_tx, job_rx) = mpsc::channel::<Job>(5000);
+    start_workers(Arc::new(tokio::sync::Mutex::new(job_rx)));
+
+    let state = AppState { pool, job_tx };
 
     let app = Router::new()
-        .route("/users/:id", get(handle_get_users))
-        .route("/complex/:n", get(handle_complex))
-        .with_state(shared_state);
+        .route("/db/:id", get(get_user))
+        .route("/calc", get(calc))
+        .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-    println!("Rust listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap(),
+        app,
+    )
+    .await
+    .unwrap();
 }
 
-// Complex Fibonacci function (CPU-intensive)
-fn fib(n: u32) -> u64 {
-    match n {
-        0 => 0,
-        1 => 1,
-        _ => fib(n - 1) + fib(n - 2),
-    }
-}
+/* ---------- HANDLERS ---------- */
 
-// --- 1. Original Endpoint (I/O Stress) ---
-#[derive(sqlx::FromRow, Serialize)]
-struct User {
-    name: String,
-}
-
-async fn handle_get_users(
+async fn get_user(
+    Path(id): Path<i32>,
     State(state): State<AppState>,
-    Path(id): Path<u32>,
-) -> Result<Json<User>, (StatusCode, String)> {
-    let user = sqlx::query_as::<_, User>("SELECT name FROM users WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB Error: {}", e)))?;
+) -> Json<User> {
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, name, email FROM users WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
 
-    match user {
-        Some(u) => Ok(Json(u)),
-        None => Err((StatusCode::NOT_FOUND, "user not found".to_string())),
-    }
+    Json(user)
 }
 
-// --- 2. New Complex Endpoint (CPU + I/O Stress) ---
-async fn handle_complex(
-    State(state): State<AppState>,
-    Path(n): Path<u32>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // 1. CPU-intensive calculation
-    let start = Instant::now();
-    let result = tokio::task::spawn_blocking(move || fib(n)).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Task error: {}", e)))?;
-    let duration_ms = start.elapsed().as_millis() as u64;
+async fn calc(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let (tx, rx) = oneshot::channel();
 
-    // 2. I/O operation (DB Query)
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB Count Error: {}", e)))?;
-    let db_rows = count.0;
+    state
+        .job_tx
+        .try_send(tx)
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
 
-    // 3. Return results including the calculation time (for metric extraction)
-    Ok(Json(json!({
-        "fib_input": n,
-        "fib_result": result,
-        "calc_time_ms": duration_ms, // New metric
-        "db_rows": db_rows,
-        "language": "Rust",
-    })))
+    let result = rx.await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "result": result })))
 }
