@@ -1,76 +1,47 @@
 const fastify = require('fastify')({ logger: false });
 const mysql = require('mysql2/promise');
-const { Worker } = require('worker_threads');
-const os = require('os');
 
 /* ---------- DB ---------- */
 
 const pool = mysql.createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASS,
-    database: process.env.DB_NAME,
-    connectionLimit: 10
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME,
+  connectionLimit: 10
 });
 
-/* ---------- WORKER POOL ---------- */
+/* ---------- PRIME ---------- */
 
-const WORKERS = os.cpus().length;
-const QUEUE_LIMIT = 5000;
-
-const workers = [];
-const queue = [];
-
-for (let i = 0; i < WORKERS; i++) {
-    const worker = new Worker('./worker.js');
-    worker.busy = false;
-    workers.push(worker);
+function isPrime(num) {
+  if (num <= 1) return false;
+  for (let i = 2; i * i <= num; i++) {
+    if (num % i === 0) return false;
+  }
+  return true;
 }
 
-function runJob() {
-    const worker = workers.find(w => !w.busy);
-    if (!worker || queue.length === 0) return;
-
-    worker.busy = true;
-    const job = queue.shift();
-
-    worker.once('message', result => {
-        worker.busy = false;
-        job.resolve(result);
-        runJob();
-    });
-
-    worker.postMessage('go');
-}
-
-function submitJob() {
-    return new Promise((resolve, reject) => {
-        if (queue.length >= QUEUE_LIMIT) {
-            reject(new Error('busy'));
-            return;
-        }
-        queue.push({ resolve });
-        runJob();
-    });
+function compute10kPrime() {
+  let count = 0, num = 2;
+  while (count < 10000) {
+    if (isPrime(num)) count++;
+    num++;
+  }
+  return num - 1;
 }
 
 /* ---------- ROUTES ---------- */
 
 fastify.get('/db/:id', async (req) => {
-    const [rows] = await pool.query(
-        'SELECT id, name, email FROM users WHERE id = ?',
-        [req.params.id]
-    );
-    return rows[0];
+  const [rows] = await pool.query(
+    'SELECT id, name, email FROM users WHERE id = ?',
+    [req.params.id]
+  );
+  return rows[0] || {};
 });
 
-fastify.get('/calc', async (req, reply) => {
-    try {
-        const result = await submitJob();
-        return { result };
-    } catch {
-        reply.code(429).send({ error: 'server busy' });
-    }
+fastify.get('/calc', async () => {
+  return { result: compute10kPrime() };
 });
 
 /* ---------- START ---------- */

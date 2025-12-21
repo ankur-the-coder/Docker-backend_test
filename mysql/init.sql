@@ -1,12 +1,32 @@
-CREATE TABLE IF NOT EXISTS users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    email VARCHAR(100) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+CREATE DATABASE IF NOT EXISTS benchmark_db;
+USE benchmark_db;
+
+DROP TABLE IF EXISTS users;
+
+CREATE TABLE users (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  email VARCHAR(150) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_email (email)
 );
 
--- Insert dummy data (Repeat this block or use a loop if you need more rows)
-INSERT INTO users (name, email) VALUES 
-('Alice', 'alice@example.com'),
-('Bob', 'bob@example.com'),
-('Charlie', 'charlie@example.com');
+DELIMITER $$
+
+CREATE PROCEDURE seed_users()
+BEGIN
+  DECLARE i INT DEFAULT 1;
+  WHILE i <= 10000 DO
+    INSERT INTO users (name, email)
+    VALUES (
+      CONCAT('user_', i),
+      CONCAT('user_', i, '@test.com')
+    );
+    SET i = i + 1;
+  END WHILE;
+END$$
+
+DELIMITER ;
+
+CALL seed_users();
+DROP PROCEDURE seed_users;

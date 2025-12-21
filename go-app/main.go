@@ -2,14 +2,16 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -19,13 +21,12 @@ type User struct {
 	Email string `json:"email"`
 }
 
-/* ---------------- CPU PRIME LOGIC ---------------- */
-// No changes to logic, just pure raw execution power.
+/* ---------- PRIME ---------- */
+
 func isPrime(num int) bool {
 	if num <= 1 {
 		return false
 	}
-	// Optimization: Only check up to sqrt, skip even numbers after 2
 	if num == 2 {
 		return true
 	}
@@ -42,8 +43,7 @@ func isPrime(num int) bool {
 }
 
 func compute10kPrime() int {
-	count := 0
-	num := 2
+	count, num := 0, 2
 	for count < 10000 {
 		if isPrime(num) {
 			count++
@@ -53,13 +53,12 @@ func compute10kPrime() int {
 	return num - 1
 }
 
-/* ---------------- MAIN ---------------- */
+/* ---------- MAIN ---------- */
 
 func main() {
-	// 1. Maximize CPU usage
+	// IMPORTANT: Respect Docker CPU quota
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	/* ---- DB CONFIGURATION ---- */
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:3306)/%s",
 		os.Getenv("DB_USER"),
 		os.Getenv("DB_PASS"),
@@ -67,60 +66,38 @@ func main() {
 		os.Getenv("DB_NAME"),
 	)
 
-	// retry connection logic for docker startup race conditions
-	var db *sql.DB
-	var err error
-	for i := 0; i < 10; i++ {
-		db, err = sql.Open("mysql", dsn)
-		if err == nil && db.Ping() == nil {
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// 2. Optimization: Increase Connection Pool
-	// 10 was too low for 2000 VUs. 50 fits well within 100MB RAM limits 
-	// while allowing high IO throughput.
-	db.SetMaxOpenConns(50)
-	db.SetMaxIdleConns(25)
+	db.SetMaxOpenConns(20)
+	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	/* ---- FIBER APP ---- */
-	app := fiber.New(fiber.Config{
-		DisableStartupMessage: true,
-		// Optimization: fast pre-allocation for high throughput
-		Concurrency: 256 * 1024, 
-	})
+	http.HandleFunc("/db/", func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.URL.Path[len("/db/"):]
+		id, _ := strconv.Atoi(idStr)
 
-	/* ---------------- I/O ENDPOINT ---------------- */
-	app.Get("/db/:id", func(c *fiber.Ctx) error {
-		id := c.Params("id")
-		var user User
-		// QueryRow is efficient and releases connection immediately
+		var u User
 		err := db.QueryRow(
 			"SELECT id, name, email FROM users WHERE id = ?",
 			id,
-		).Scan(&user.ID, &user.Name, &user.Email)
+		).Scan(&u.ID, &u.Name, &u.Email)
 
 		if err != nil {
-			return c.SendStatus(404) // Return 404 instead of 500 for missing ID
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
-		return c.JSON(user)
+
+		json.NewEncoder(w).Encode(u)
 	})
 
-	/* ---------------- CPU ENDPOINT ---------------- */
-	app.Get("/calc", func(c *fiber.Ctx) error {
-		// 3. Optimization: Native Goroutines
-		// We removed the Worker Pool. Go spawns a lightweight Goroutine 
-		// for every request. The Runtime Scheduler automatically timeslices 
-		// these across your 4 CPUs. 
-		// This eliminates the "Queue Full" (HTTP 429) errors entirely.
+	http.HandleFunc("/calc", func(w http.ResponseWriter, r *http.Request) {
 		result := compute10kPrime()
-		return c.JSON(fiber.Map{"result": result})
+		json.NewEncoder(w).Encode(map[string]int{"result": result})
 	})
 
-	log.Fatal(app.Listen(":8080"))
+	log.Println("Go server on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

@@ -1,4 +1,14 @@
 services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: benchmark_db
+    command:
+      - --max_connections=200
+    ports:
+      - "3306:3306"
+
   node-app:
     build: ./node-app
     ports: ["3000:3000"]
@@ -11,7 +21,7 @@ services:
       resources:
         limits:
           cpus: "2"
-          memory: 100M
+          memory: 500M
 
   go-app:
     build: ./go-app
@@ -25,7 +35,7 @@ services:
       resources:
         limits:
           cpus: "2"
-          memory: 100M
+          memory: 500M
 
   rust-app:
     build: ./rust-app
@@ -36,4 +46,4 @@ services:
       resources:
         limits:
           cpus: "2"
-          memory: 100M
+          memory: 500M
